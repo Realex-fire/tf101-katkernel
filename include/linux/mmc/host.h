@@ -16,9 +16,6 @@
 #include <linux/mmc/core.h>
 #include <linux/mmc/pm.h>
 
-#define SD_CARD_DETECT 69
-#define EN_VDDIO_SD 70
-
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
 	unsigned short	vdd;
@@ -140,6 +137,13 @@ struct mmc_host_ops {
 	void	(*init_card)(struct mmc_host *host, struct mmc_card *card);
 
 	int	(*start_signal_voltage_switch)(struct mmc_host *host, struct mmc_ios *ios);
+	// LGE_CHANGE [dojip.kim@lge.com] 2010-12-31, [LGE_AP20] from Star
+#ifdef CONFIG_EMBEDDED_MMC_START_OFFSET
+	unsigned int (*get_host_offset)(struct mmc_host *host);
+#endif
+	int	(*execute_tuning)(struct mmc_host *host);
+	int	(*select_drive_strength)(unsigned int max_dtr,
+		int host_drv, int card_drv);
 };
 
 struct mmc_card;
@@ -292,7 +296,6 @@ struct mmc_host {
 #endif
 
 	unsigned long		private[0] ____cacheline_aligned;
-	u32			opcode;
 };
 
 extern struct mmc_host *mmc_alloc_host(int extra, struct device *);
@@ -390,9 +393,14 @@ static inline int mmc_card_is_removable(struct mmc_host *host)
 	return !(host->caps & MMC_CAP_NONREMOVABLE) && mmc_assume_removable;
 }
 
-static inline int mmc_card_is_powered_resumed(struct mmc_host *host)
+static inline int mmc_card_keep_power(struct mmc_host *host)
 {
 	return host->pm_flags & MMC_PM_KEEP_POWER;
+}
+
+static inline int mmc_card_wake_sdio_irq(struct mmc_host *host)
+{
+	return host->pm_flags & MMC_PM_WAKE_SDIO_IRQ;
 }
 
 #endif

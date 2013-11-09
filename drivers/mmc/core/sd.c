@@ -17,6 +17,8 @@
 #include <linux/mmc/card.h>
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/sd.h>
+#include <linux/jiffies.h>
+#include <linux/nmi.h>
 
 #include "core.h"
 #include "bus.h"
@@ -56,6 +58,15 @@ static const unsigned int tacc_mant[] = {
 			__res |= resp[__off-1] << ((32 - __shft) % 32);	\
 		__res & __mask;						\
 	})
+
+// timeout for tries
+static const unsigned long retry_timeout_ms= 10*1000;
+
+// try at least 10 times, even if timeout is reached
+static const int retry_min_tries= 10;
+
+// delay between tries
+static const unsigned long retry_delay_ms= 10;
 
 /*
  * Given the decoded CSD structure, decode the raw CID to our CID structure.
@@ -112,6 +123,12 @@ static int mmc_decode_csd(struct mmc_card *card)
 		e = UNSTUFF_BITS(resp, 47, 3);
 		m = UNSTUFF_BITS(resp, 62, 12);
 		csd->capacity	  = (1 + m) << (e + 2);
+		// LGE_CHANGE [dojip.kim@lge.com] 2010-12-31, [LGE_AP20] from Star
+#ifdef CONFIG_EMBEDDED_MMC_START_OFFSET
+		BUG_ON(card->host->ops->get_host_offset(card->host) >=
+			csd->capacity);
+		csd->capacity -= card->host->ops->get_host_offset(card->host);
+#endif
 
 		csd->read_blkbits = UNSTUFF_BITS(resp, 80, 4);
 		csd->read_partial = UNSTUFF_BITS(resp, 79, 1);
@@ -147,6 +164,13 @@ static int mmc_decode_csd(struct mmc_card *card)
 
 		m = UNSTUFF_BITS(resp, 48, 22);
 		csd->capacity     = (1 + m) << 10;
+		// LGE_CHANGE [dojip.kim@lge.com] 2010-12-31, [LGE_AP20] from Star
+#ifdef CONFIG_EMBEDDED_MMC_START_OFFSET
+		BUG_ON((card->host->ops->get_host_offset(card->host) >> 9) >=
+			csd->capacity);
+		csd->capacity -=
+			(card->host->ops->get_host_offset(card->host) >> 9);
+#endif
 
 		csd->read_blkbits = 9;
 		csd->read_partial = 0;
@@ -202,12 +226,62 @@ static int mmc_decode_scr(struct mmc_card *card)
 }
 
 /*
+ * Fetch and process SD Configuration Register.
+ */
+static int mmc_read_scr(struct mmc_card *card)
+{
+	unsigned long timeout_at;
+	int err, tries;
+
+	timeout_at= jiffies + msecs_to_jiffies( retry_timeout_ms );
+	tries=     0;
+
+	while( tries < retry_min_tries || time_before( jiffies, timeout_at ) )
+	{
+		unsigned long delay_at;
+		tries++;
+
+		err = mmc_app_send_scr(card, card->raw_scr);
+		if( !err )
+			break; // sucess!!!
+
+		touch_nmi_watchdog();    // we are still alive!
+
+		// delay
+		delay_at= jiffies + msecs_to_jiffies( retry_delay_ms );
+		while( time_before( jiffies, delay_at ) )
+		{
+			mdelay( 1 );
+			touch_nmi_watchdog();    // we are still alive!
+		}
+	}
+
+	if( err)
+	{
+		pr_err("%s: failed to read SD Configuration register (SCR) after %d tries during %lu ms, error %d\n", mmc_hostname(card->host), tries, retry_timeout_ms, err );
+		return err;
+	}
+
+	if( tries > 1 )
+	{
+		pr_info("%s: could read SD Configuration register (SCR) at the %dth attempt\n", mmc_hostname(card->host), tries );
+	}
+
+	err = mmc_decode_scr(card);
+	if (err)
+		return err;
+
+	return err;
+}
+
+/*
  * Fetch and process SD Status register.
  */
 static int mmc_read_ssr(struct mmc_card *card)
 {
+	unsigned long timeout_at;
 	unsigned int au, es, et, eo;
-	int err, i;
+	int err, i, tries;
 	u32 *ssr;
 
 	if (!(card->csd.cmdclass & CCC_APP_SPEC)) {
@@ -220,12 +294,38 @@ static int mmc_read_ssr(struct mmc_card *card)
 	if (!ssr)
 		return -ENOMEM;
 
-	err = mmc_app_sd_status(card, ssr);
-	if (err) {
-		printk(KERN_WARNING "%s: problem reading SD Status "
-			"register.\n", mmc_hostname(card->host));
-		err = 0;
+	timeout_at= jiffies + msecs_to_jiffies( retry_timeout_ms );
+	tries=     0;
+
+	while( tries < retry_min_tries || time_before( jiffies, timeout_at ) )
+	{
+		unsigned long delay_at;
+		tries++;
+
+		err= mmc_app_sd_status(card, ssr);
+		if( !err )
+			break; // sucess!!!
+
+		touch_nmi_watchdog();    // we are still alive!
+
+		// delay
+		delay_at= jiffies + msecs_to_jiffies( retry_delay_ms );
+		while( time_before( jiffies, delay_at ) )
+		{
+			mdelay( 1 );
+			touch_nmi_watchdog();    // we are still alive!
+		}
+	}
+
+	if( err)
+	{
+		pr_err("%s: failed to read SD Status register (SSR) after %d tries during %lu ms, error %d\n", mmc_hostname(card->host), tries, retry_timeout_ms, err );
 		goto out;
+	}
+
+	if( tries > 1 )
+	{
+		pr_info("%s: could read SD Status register (SSR) at the %dth attempt\n", mmc_hostname(card->host), tries );
 	}
 
 	for (i = 0; i < 16; i++)
@@ -402,52 +502,62 @@ out:
 
 static int sd_select_driver_type(struct mmc_card *card, u8 *status)
 {
-	int host_drv_type = 0, card_drv_type = 0;
+	int host_drv_type = SD_DRIVER_TYPE_B;
+	int card_drv_type = SD_DRIVER_TYPE_B;
+	int drive_strength;
 	int err;
 
 	/*
 	 * If the host doesn't support any of the Driver Types A,C or D,
-	 * default Driver Type B is used.
+	 * or there is no board specific handler then default Driver
+	 * Type B is used.
 	 */
 	if (!(card->host->caps & (MMC_CAP_DRIVER_TYPE_A | MMC_CAP_DRIVER_TYPE_C
 	    | MMC_CAP_DRIVER_TYPE_D)))
 		return 0;
 
-	if (card->host->caps & MMC_CAP_DRIVER_TYPE_A) {
-		host_drv_type = MMC_SET_DRIVER_TYPE_A;
-		if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_A)
-			card_drv_type = MMC_SET_DRIVER_TYPE_A;
-		else if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_B)
-			card_drv_type = MMC_SET_DRIVER_TYPE_B;
-		else if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_C)
-			card_drv_type = MMC_SET_DRIVER_TYPE_C;
-	} else if (card->host->caps & MMC_CAP_DRIVER_TYPE_C) {
-		host_drv_type = MMC_SET_DRIVER_TYPE_C;
-		if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_C)
-			card_drv_type = MMC_SET_DRIVER_TYPE_C;
-	} else if (!(card->host->caps & MMC_CAP_DRIVER_TYPE_D)) {
-		/*
-		 * If we are here, that means only the default driver type
-		 * B is supported by the host.
-		 */
-		host_drv_type = MMC_SET_DRIVER_TYPE_B;
-		if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_B)
-			card_drv_type = MMC_SET_DRIVER_TYPE_B;
-		else if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_C)
-			card_drv_type = MMC_SET_DRIVER_TYPE_C;
-	}
+	if (!card->host->ops->select_drive_strength)
+		return 0;
 
-	err = mmc_sd_switch(card, 1, 2, card_drv_type, status);
+	if (card->host->caps & MMC_CAP_DRIVER_TYPE_A)
+		host_drv_type |= SD_DRIVER_TYPE_A;
+
+	if (card->host->caps & MMC_CAP_DRIVER_TYPE_C)
+		host_drv_type |= SD_DRIVER_TYPE_C;
+
+	if (card->host->caps & MMC_CAP_DRIVER_TYPE_D)
+		host_drv_type |= SD_DRIVER_TYPE_D;
+
+	if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_A)
+		card_drv_type |= SD_DRIVER_TYPE_A;
+
+	if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_C)
+		card_drv_type |= SD_DRIVER_TYPE_C;
+
+	if (card->sw_caps.sd3_drv_type & SD_DRIVER_TYPE_D)
+		card_drv_type |= SD_DRIVER_TYPE_D;
+
+	/*
+	 * The drive strength that the hardware can support
+	 * depends on the board design.  Pass the appropriate
+	 * information and let the hardware specific code
+	 * return what is possible given the options
+	 */
+	drive_strength = card->host->ops->select_drive_strength(
+		card->sw_caps.uhs_max_dtr,
+		host_drv_type, card_drv_type);
+
+	err = mmc_sd_switch(card, 1, 2, drive_strength, status);
 	if (err)
 		return err;
 
-	if ((status[15] & 0xF) != card_drv_type) {
-		printk(KERN_WARNING "%s: Problem setting driver strength!\n",
+	if ((status[15] & 0xF) != drive_strength) {
+		printk(KERN_WARNING "%s: Problem setting drive strength!\n",
 			mmc_hostname(card->host));
 		return 0;
 	}
 
-	mmc_set_driver_type(card->host, host_drv_type);
+	mmc_set_driver_type(card->host, drive_strength);
 
 	return 0;
 }
@@ -507,6 +617,8 @@ static int sd_set_bus_speed_mode(struct mmc_card *card, u8 *status)
 	}
 	else {
 		mmc_set_timing(card->host, timing);
+		if (timing == MMC_TIMING_UHS_DDR50)
+			mmc_card_set_ddr_mode(card);
 		mmc_set_clock(card->host, card->sw_caps.uhs_max_dtr);
 	}
 
@@ -551,7 +663,12 @@ static int mmc_sd_init_uhs_card(struct mmc_card *card)
 
 	/* Set bus speed mode of the card */
 	err = sd_set_bus_speed_mode(card, status);
+	if (err)
+		goto out;
 
+	/* SPI mode doesn't define CMD19 */
+	if (!mmc_host_is_spi(card->host) && card->host->ops->execute_tuning)
+		err = card->host->ops->execute_tuning(card->host);
 out:
 	kfree(status);
 
@@ -695,13 +812,9 @@ int mmc_sd_setup_card(struct mmc_host *host, struct mmc_card *card,
 
 	if (!reinit) {
 		/*
-		 * Fetch SCR from card.
+		 * Fetch and decode SD Configuration register.
 		 */
-		err = mmc_app_send_scr(card, card->raw_scr);
-		if (err)
-			return err;
-
-		err = mmc_decode_scr(card);
+		err = mmc_read_scr(card);
 		if (err)
 			return err;
 
@@ -871,6 +984,9 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 		err = mmc_sd_init_uhs_card(card);
 		if (err)
 			goto free_card;
+
+		/* Card is an ultra-high-speed card */
+		mmc_card_set_uhs(card);
 	} else {
 		/*
 		 * Attempt to change to high-speed (if supported)
@@ -918,15 +1034,13 @@ static void mmc_sd_remove(struct mmc_host *host)
 	BUG_ON(!host->card);
 
 	mmc_remove_card(host->card);
-	mmc_claim_host(host);
 	host->card = NULL;
-	mmc_release_host(host);
 }
 
 /*
  * Card detection callback from host.
  */
-static int mmc_sd_detect(struct mmc_host *host)
+static void mmc_sd_detect(struct mmc_host *host)
 {
 	int err = 0;
 #ifdef CONFIG_MMC_PARANOID_SD_INIT
@@ -967,7 +1081,6 @@ static int mmc_sd_detect(struct mmc_host *host)
 		mmc_detach_bus(host);
 		mmc_release_host(host);
 	}
-	return err;
 }
 
 /*

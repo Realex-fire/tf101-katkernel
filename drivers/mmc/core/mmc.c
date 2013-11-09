@@ -98,7 +98,6 @@ static int mmc_decode_cid(struct mmc_card *card)
 		card->cid.serial	= UNSTUFF_BITS(resp, 16, 32);
 		card->cid.month		= UNSTUFF_BITS(resp, 12, 4);
 		card->cid.year		= UNSTUFF_BITS(resp, 8, 4) + 1997;
-		card->cid.prv		= UNSTUFF_BITS(resp, 48, 8);
 		break;
 
 	default:
@@ -155,6 +154,12 @@ static int mmc_decode_csd(struct mmc_card *card)
 	e = UNSTUFF_BITS(resp, 47, 3);
 	m = UNSTUFF_BITS(resp, 62, 12);
 	csd->capacity	  = (1 + m) << (e + 2);
+	// LGE_CHANGE [dojip.kim@lge.com] 2010-12-31, [LGE_AP20] from Star K32
+#ifdef CONFIG_EMBEDDED_MMC_START_OFFSET
+	/* for sector-addressed cards, this will cause csd->capacity to wrap */
+	if (mmc_card_blockaddr(card))
+		csd->capacity -= card->host->ops->get_host_offset(card->host);
+#endif
 
 	csd->read_blkbits = UNSTUFF_BITS(resp, 80, 4);
 	csd->read_partial = UNSTUFF_BITS(resp, 79, 1);
@@ -254,14 +259,30 @@ static int mmc_read_ext_csd(struct mmc_card *card)
 			ext_csd[EXT_CSD_SEC_CNT + 2] << 16 |
 			ext_csd[EXT_CSD_SEC_CNT + 3] << 24;
 
-		card->ext_csd.sec_count = card->ext_csd.sectors;
-
 		/* Cards with density > 2GiB are sector addressed */
 		if (card->ext_csd.sectors > (2u * 1024 * 1024 * 1024) / 512) {
+			// LGE_CHANGE [dojip.kim@lge.com] 2010-12-31, 
+			// [LGE_AP20] from Star K32
+#ifdef CONFIG_EMBEDDED_MMC_START_OFFSET
+			unsigned offs;
+			offs = card->host->ops->get_host_offset(card->host);
+			offs >>= 9;
+			BUG_ON(offs >= card->ext_csd.sectors);
+			card->ext_csd.sectors -= offs;
+
+			// LGE_CHANGE [dojip.kim@lge.com] 2011-01-04,
+			// [LGE_AP20] fix to report correct disk space in case of
+			// emmc 4.3+ cards (from Star K32)
+			offs = ext_csd[EXT_CSD_BOOT_SIZE_MULTI] * 512;
+			card->ext_csd.sectors -= offs;
+#else /* original codes */
+#ifndef CONFIG_MACH_BSSQ
 			unsigned boot_sectors;
-			boot_sectors = ext_csd[EXT_CSD_BOOT_SIZE_MULTI];
-			boot_sectors *= SZ_256K / 512;
+			/* size is in 256K chunks, i.e. 512 sectors each */
+			boot_sectors = ext_csd[EXT_CSD_BOOT_SIZE_MULTI] * 512;
 			card->ext_csd.sectors -= boot_sectors;
+#endif //#ifndef CONFIG_MACH_BSSQ
+#endif
 			mmc_card_set_blockaddr(card);
 		}
 	}
@@ -407,8 +428,6 @@ MMC_DEV_ATTR(serial, "0x%08x\n", card->cid.serial);
 MMC_DEV_ATTR(enhanced_area_offset, "%llu\n",
 		card->ext_csd.enhanced_area_offset);
 MMC_DEV_ATTR(enhanced_area_size, "%u\n", card->ext_csd.enhanced_area_size);
-MMC_DEV_ATTR(sec_count, "0x%x\n", card->ext_csd.sec_count);
-MMC_DEV_ATTR(prv, "0x%x\n", card->cid.prv);
 
 static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_cid.attr,
@@ -424,8 +443,6 @@ static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_serial.attr,
 	&dev_attr_enhanced_area_offset.attr,
 	&dev_attr_enhanced_area_size.attr,
-	&dev_attr_sec_count.attr,
-	&dev_attr_prv.attr,
 	NULL,
 };
 
@@ -550,23 +567,25 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 			goto free_card;
 	}
 
-	/*
-	 * Fetch and process extended CSD.
-	 */
-	err = mmc_read_ext_csd(card);
-	if (err)
-		goto free_card;
+	if (!oldcard) {
+		/*
+		 * Fetch and process extended CSD.
+		 */
+		err = mmc_read_ext_csd(card);
+		if (err)
+			goto free_card;
 
-	/* If doing byte addressing, check if required to do sector
-	 * addressing.  Handle the case of <2GB cards needing sector
-	 * addressing.  See section 8.1 JEDEC Standard JED84-A441;
-	 * ocr register has bit 30 set for sector addressing.
-	 */
-	if (!(mmc_card_blockaddr(card)) && (rocr & (1<<30)))
-		mmc_card_set_blockaddr(card);
+		/* If doing byte addressing, check if required to do sector
+		 * addressing.  Handle the case of <2GB cards needing sector
+		 * addressing.  See section 8.1 JEDEC Standard JED84-A441;
+		 * ocr register has bit 30 set for sector addressing.
+		 */
+		if (!(mmc_card_blockaddr(card)) && (rocr & (1<<30)))
+			mmc_card_set_blockaddr(card);
 
-	/* Erase size depends on CSD and Extended CSD */
-	mmc_set_erase_size(card);
+		/* Erase size depends on CSD and Extended CSD */
+		mmc_set_erase_size(card);
+	}
 
 	/*
 	 * If enhanced_area_en is TRUE, host needs to enable ERASE_GRP_DEF
@@ -785,15 +804,13 @@ static void mmc_remove(struct mmc_host *host)
 	BUG_ON(!host->card);
 
 	mmc_remove_card(host->card);
-	mmc_claim_host(host);
 	host->card = NULL;
-	mmc_release_host(host);
 }
 
 /*
  * Card detection callback from host.
  */
-static int mmc_detect(struct mmc_host *host)
+static void mmc_detect(struct mmc_host *host)
 {
 	int err;
 
@@ -816,7 +833,6 @@ static int mmc_detect(struct mmc_host *host)
 		mmc_detach_bus(host);
 		mmc_release_host(host);
 	}
-	return err;
 }
 
 /*
@@ -845,8 +861,7 @@ static int mmc_suspend(struct mmc_host *host)
 static int mmc_resume(struct mmc_host *host)
 {
 	int err;
-	
-	printk("mmc_resume\n");
+
 	BUG_ON(!host);
 	BUG_ON(!host->card);
 
