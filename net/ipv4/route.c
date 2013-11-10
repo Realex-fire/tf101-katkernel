@@ -2620,8 +2620,15 @@ static struct rtable *ip_route_output_slow(struct net *net,
 		fl4.saddr = FIB_RES_PREFSRC(net, res);
 
 	dev_out = FIB_RES_DEV(res);
-	fl4.flowi4_oif = dev_out->ifindex;
+	if (dev_out == NULL) {
+		rth = ERR_PTR(-ENODEV);
+		goto out;
+	}
 
+	if (!fl4->saddr)
+		fl4->saddr = FIB_RES_PREFSRC(net, res);
+
+	fl4->flowi4_oif = dev_out->ifindex;
 
 make_route:
 	rth = __mkroute_output(&res, &fl4, oldflp4, dev_out, flags);
