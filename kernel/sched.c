@@ -3216,7 +3216,7 @@ static int test_cpu_load_update_mask(void)
 }
 
 /*
-  * No protection here for race, so take care outside
+ * No protection here for race, so take care outside
  *
  * Ret:
  * 1 -- empty mask
@@ -3529,7 +3529,7 @@ void calc_global_load(unsigned long ticks)
 	calc_load_update += LOAD_FREQ;
 
 	/*
-	* In case we idled for multiple LOAD_FREQ intervals, catch up in bulk.
+	 * In case we idled for multiple LOAD_FREQ intervals, catch up in bulk.
 	 */
 	calc_global_nohz();
 }
