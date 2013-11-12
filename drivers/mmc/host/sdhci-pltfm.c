@@ -35,6 +35,8 @@
 #include "sdhci.h"
 #include "sdhci-pltfm.h"
 
+#include "../debug_mmc.h"
+
 /*****************************************************************************\
  *                                                                           *
  * SDHCI core callbacks                                                      *
@@ -185,29 +187,22 @@ static int sdhci_pltfm_suspend(struct platform_device *dev, pm_message_t state)
 {
 	struct sdhci_host *host = platform_get_drvdata(dev);
 	int ret;
+	MMC_printk("%s: ++", mmc_hostname(host->mmc));
 
 	ret = sdhci_suspend_host(host, state);
 	if (ret) {
 		dev_err(&dev->dev, "suspend failed, error = %d\n", ret);
 		return ret;
 	}
-	
-#if defined (CONFIG_MACH_STAR) // 2012-07-16 hyeondug.yeo@lge.com, Fix the "WLAN_HOST_WAKEUP" problem.
-	if(host->irq==INT_SDMMC1)
-		enable_irq_wake(host->irq);
-#endif
 
 	if (host->ops && host->ops->suspend)
 		ret = host->ops->suspend(host, state);
 	if (ret) {
 		dev_err(&dev->dev, "suspend hook failed, error = %d\n", ret);
 		sdhci_resume_host(host);
-#if defined (CONFIG_MACH_STAR) // 2012-08-03 hyeondug.yeo@lge.com, Set SDIO clock for Wi-Fi.
-	if(host->irq == INT_SDMMC1)
-		disable_irq_wake(host->irq);
-#endif
 	}
 
+	MMC_printk("%s: --", mmc_hostname(host->mmc));
 	return ret;
 }
 
@@ -215,12 +210,7 @@ static int sdhci_pltfm_resume(struct platform_device *dev)
 {
 	struct sdhci_host *host = platform_get_drvdata(dev);
 	int ret = 0;
-
-#if defined (CONFIG_MACH_STAR) // 2012-07-16 hyeondug.yeo@lge.com, Fix the "WLAN_HOST_WAKEUP" problem.
-	if(host->irq==INT_SDMMC1)
-		disable_irq_wake(host->irq);
-#endif
-
+	MMC_printk("%s: ++", mmc_hostname(host->mmc));
 
 	if (host->ops && host->ops->resume)
 		ret = host->ops->resume(host);
@@ -233,6 +223,7 @@ static int sdhci_pltfm_resume(struct platform_device *dev)
 	if (ret)
 		dev_err(&dev->dev, "resume failed, error = %d\n", ret);
 
+	MMC_printk("%s: --", mmc_hostname(host->mmc));
 	return ret;
 }
 #else
@@ -260,7 +251,11 @@ static struct platform_driver sdhci_pltfm_driver = {
 
 static int __init sdhci_drv_init(void)
 {
-	return platform_driver_register(&sdhci_pltfm_driver);
+	int ret = 0;
+	printk(KERN_INFO "%s+ #####\n", __func__);
+	ret = platform_driver_register(&sdhci_pltfm_driver);
+	printk(KERN_INFO "%s- #####\n", __func__);
+	return ret;
 }
 
 static void __exit sdhci_drv_exit(void)

@@ -27,7 +27,7 @@ struct sdhci_host;
  */
 struct sdhci_pltfm_data {
 	struct sdhci_ops *ops;
-	u64 quirks;
+	unsigned int quirks;
 	int (*init)(struct sdhci_host *host, struct sdhci_pltfm_data *pdata);
 	void (*exit)(struct sdhci_host *host);
 };
