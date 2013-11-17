@@ -1056,6 +1056,13 @@ CONFIG_KERNEL_RAMDUMP=y
 # CONFIG_C2PORT is not set
 
 #
+# Device Kernel Optimizations
+#
+CONFIG_ARM_CPU_TOPOLOGY=y
+CONFIG_SCHED_SMT=y
+CONFIG_SCHED_MC=y
+
+#
 # EEPROM support
 #
 # CONFIG_EEPROM_AT24 is not set
