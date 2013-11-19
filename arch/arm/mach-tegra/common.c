@@ -92,7 +92,7 @@ unsigned long tegra_fb_size;
 unsigned long tegra_fb2_start;
 unsigned long tegra_fb2_size;
 unsigned long tegra_carveout_start;
-unsigned long tegra_carveout_size;
+unsigned long tegra_carveout_size = 0x07800000; // 120MB
 unsigned long tegra_vpr_start;
 unsigned long tegra_vpr_size;
 unsigned long tegra_lp0_vec_start;
@@ -774,6 +774,10 @@ void __init tegra_reserve(unsigned long carveout_size, unsigned long fb_size,
 #endif
 
 	if (carveout_size) {
+		/* eating the carveout a bit */
+		if (tegra_carveout_size > 0)
+			carveout_size = tegra_carveout_size;
+
 		tegra_carveout_start = memblock_end_of_DRAM() - carveout_size;
 		if (memblock_remove(tegra_carveout_start, carveout_size)) {
 			pr_err("Failed to remove carveout %08lx@%08lx "
