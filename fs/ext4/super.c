@@ -591,6 +591,7 @@ void __ext4_warning(struct super_block *sb, const char *function,
 	printk(KERN_WARNING "EXT4-fs warning (device %s): %s:%d: %pV\n",
 	       sb->s_id, function, line, &vaf);
 	va_end(args);
+	save_error_info(sb, function, line);
 }
 
 void __ext4_grp_locked_error(const char *function, unsigned int line,
