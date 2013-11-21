@@ -561,11 +561,8 @@ source "drivers/misc/lis3lv02d/Kconfig"
 source "drivers/misc/mpu3050/Kconfig"
 source "drivers/misc/tegra-baseband/Kconfig"
 
-config FSYNC_CONTROL
-        bool "Support for FSync Control"
-        default y
-        help
-          Say Y here to enable FSync Control
-
+config DYNAMIC_FSYNC
+	bool "Disable FSync when screen is on and flush buffers when it's off"
+	default y
 
 endif # MISC_DEVICES
