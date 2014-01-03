@@ -14,6 +14,8 @@
  *
  */
 
+#define pr_fmt(fmt) "timed_output: " fmt
+
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/device.h>
@@ -26,7 +28,7 @@ static struct class *timed_output_class;
 static atomic_t device_count;
 
 static ssize_t enable_show(struct device *dev, struct device_attribute *attr,
-		char *buf)
+			   char *buf)
 {
 	struct timed_output_dev *tdev = dev_get_drvdata(dev);
 	int remaining = tdev->get_time(tdev);
@@ -34,9 +36,8 @@ static ssize_t enable_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%d\n", remaining);
 }
 
-static ssize_t enable_store(
-		struct device *dev, struct device_attribute *attr,
-		const char *buf, size_t size)
+static ssize_t enable_store(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t size)
 {
 	struct timed_output_dev *tdev = dev_get_drvdata(dev);
 	int value;
@@ -48,7 +49,6 @@ static ssize_t enable_store(
 
 	return size;
 }
-
 static DEVICE_ATTR(enable, S_IRUGO | S_IWUSR, enable_show, enable_store);
 
 static int create_timed_output_class(void)
@@ -76,7 +76,7 @@ int timed_output_dev_register(struct timed_output_dev *tdev)
 
 	tdev->index = atomic_inc_return(&device_count);
 	tdev->dev = device_create(timed_output_class, NULL,
-		MKDEV(0, tdev->index), NULL, tdev->name);
+		MKDEV(0, tdev->index), NULL, "%s", tdev->name);
 	if (IS_ERR(tdev->dev))
 		return PTR_ERR(tdev->dev);
 
@@ -90,7 +90,7 @@ int timed_output_dev_register(struct timed_output_dev *tdev)
 
 err_create_file:
 	device_destroy(timed_output_class, MKDEV(0, tdev->index));
-	printk(KERN_ERR "timed_output: Failed to register driver %s\n",
+	pr_err("failed to register driver %s\n",
 			tdev->name);
 
 	return ret;
@@ -99,6 +99,7 @@ EXPORT_SYMBOL_GPL(timed_output_dev_register);
 
 void timed_output_dev_unregister(struct timed_output_dev *tdev)
 {
+	tdev->enable(tdev, 0);
 	device_remove_file(tdev->dev, &dev_attr_enable);
 	device_destroy(timed_output_class, MKDEV(0, tdev->index));
 	dev_set_drvdata(tdev->dev, NULL);
